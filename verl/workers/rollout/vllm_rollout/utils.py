@@ -339,9 +339,12 @@ class vLLMColocateWorkerExtension:
                 process_quanted_weights_after_loading(model, reload_state)
         else:
             # Some post-load transforms are non-idempotent; run once after all buckets.
+            # Run them inside vLLM's config context, as vLLM's own model loaders do: layers may read
+            # get_current_vllm_config() here (e.g. to pick a kernel) and fail outside it.
+            from vllm.config import set_current_vllm_config
             from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-            with fold_unquantized_moe_params(staged_moe_layers):
+            with fold_unquantized_moe_params(staged_moe_layers), set_current_vllm_config(self.model_runner.vllm_config):
                 for model, model_config in self._iter_all_models_with_config():
                     process_weights_after_loading(model, model_config, self.device)
 
