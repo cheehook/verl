@@ -1,0 +1,81 @@
+# verl on Intel GPUs (XPU): torch 2.13 xpu, vLLM 0.29, transformers 5.17, peft 0.21.2, verl-hardware-plugin.
+# Target: verl:xpu
+#
+# Build from the verl repo root (pass the proxy build args if you are behind one):
+#   docker build -f docker/Dockerfile.xpu -t verl:xpu .
+#
+# Run (Level Zero needs the render nodes; vLLM and Ray need a large /dev/shm):
+#   docker run --rm -it --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host verl:xpu
+#
+# Tested with examples/tuning/lora/run_qwen3_8b_fsdp.sh (Qwen3-8B LoRA GRPO) on 4x Arc Pro B60.
+
+ARG BASE_IMAGE=vllm/vllm-openai-xpu:v0.29.0
+FROM ${BASE_IMAGE}
+
+ARG TRANSFORMERS_VERSION=5.17.0
+ARG KERNELS_VERSION=0.16.2
+ARG PEFT_VERSION=0.21.2
+ARG HARDWARE_PLUGIN_COMMIT=30aea693de904869e6d8c858d12a3d6de1a0b02b
+ARG PIP_NO_CACHE_DIR=1
+
+WORKDIR /opt/verl
+
+# verl dependencies, constrained to the base image's torch / vLLM / Ray stack so pip cannot swap in a CUDA
+# or CPU build. liger-kernel is CUDA-only; transformers is upgraded separately below.
+COPY requirements.txt /tmp/verl-requirements.txt
+RUN python3 -m pip freeze \
+        | grep -iE '^(torch|torchvision|torchaudio|vllm|transformers|numpy|ray|triton|pytorch-triton-xpu)==' \
+        > /tmp/pins.txt && \
+    grep -vE '^(transformers|liger-kernel|pre-commit)' /tmp/verl-requirements.txt > /tmp/reqs.txt && \
+    python3 -m pip install -c /tmp/pins.txt -r /tmp/reqs.txt && \
+    python3 -m pip install -c /tmp/pins.txt "peft==${PEFT_VERSION}" && \
+    grep -v '^transformers==' /tmp/pins.txt > /tmp/pins-no-transformers.txt && \
+    python3 -m pip install -c /tmp/pins-no-transformers.txt \
+        "transformers==${TRANSFORMERS_VERSION}" "kernels==${KERNELS_VERSION}"
+# transformers 5.17 with kernels 0.16 resolves the hub flash-attn2 kernel version that has an XPU build, so
+# flash_attention_2 and use_remove_padding work. The base image's transformers 5.15 resolves an older
+# version without one.
+
+# peft 0.21 builds the adapter state-dict key prefixes from model.named_modules() and strips only a
+# leading "_fsdp_wrapped_module." segment. verl's FSDP1 wrapping nests units (each decoder layer and each
+# LoRA leaf), so the segment also sits mid-name, nothing matches, and get_peft_model_state_dict() returns
+# an empty dict: the LoRA weight sync to vLLM then fails with StopIteration. Strip the segment at every
+# nesting level, as the fix accepted upstream in peft does. Remove this once a peft release has it.
+RUN f="$(python3 -c 'import os, peft; print(os.path.join(os.path.dirname(peft.__file__), "tuners", "tuners_utils.py"))')" && \
+    sed -i \
+        -e 's/if module_name.startswith("_fsdp_wrapped_module."):/if "_fsdp_wrapped_module." in module_name:/' \
+        -e 's/module_name = module_name.removeprefix("_fsdp_wrapped_module.")/module_name = module_name.replace("_fsdp_wrapped_module.", "")/' \
+        "$f" && \
+    test "$(grep -c '"_fsdp_wrapped_module." in module_name' "$f")" -eq 2
+
+# verl-hardware-plugin registers the "intel" platform; without it verl falls back to nvidia/NCCL.
+# Its ReduceOp.AVG patch compares dist.get_backend() with "xccl", but verl initializes "cpu:gloo,xpu:xccl"
+# and get_backend() returns that whole string, so the patch never applies under FSDP2. Match the substring.
+RUN python3 -m pip install --no-deps \
+        "https://github.com/verl-project/verl-hardware-plugin/archive/${HARDWARE_PLUGIN_COMMIT}.tar.gz" && \
+    f="$(python3 -c 'import os, verl_hardware_plugin as p; print(os.path.join(os.path.dirname(p.__file__), "accelerators", "xpu", "patches", "reduce_avg_allreduce_patch.py"))')" && \
+    sed -i 's/dist.get_backend(group) != "xccl"/"xccl" not in str(dist.get_backend(group))/' "$f" && \
+    grep -q '"xccl" not in str(dist.get_backend(group))' "$f"
+
+# oneCCL 2022.0 (torch 2.13) on the xe driver leaks imported IPC buffers into host memory, several GiB per
+# training step, unless every collective uses an on-device temp buffer (TMP_BUF, costs some VRAM). The
+# SIMPLE thresholds keep FSDP's large all-gathers and reductions on oneCCL's simple kernels; the
+# large-message path errored and hung on multi-card Arc Pro B60.
+ENV VERL_PLATFORM=intel \
+    VLLM_MQ_MAX_CHUNK_BYTES_MB=4 \
+    CCL_SYCL_ALLREDUCE_TMP_BUF=1 \
+    CCL_SYCL_ALLGATHERV_TMP_BUF=1 \
+    CCL_SYCL_REDUCE_SCATTER_TMP_BUF=1 \
+    CCL_SYCL_BROADCAST_TMP_BUF=1 \
+    CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=1073741824 \
+    CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=1073741824 \
+    CCL_SYCL_REDUCE_SCATTER_SIMPLE_THRESHOLD=1073741824
+
+# The build has no GPU, so platform auto-detection would pick nvidia here; VERL_PLATFORM above selects intel.
+COPY . /opt/verl
+RUN python3 -m pip install --no-deps -e /opt/verl && \
+    python3 -c "from verl.plugin.platform import get_platform; assert get_platform().vendor_name == 'intel', get_platform().vendor_name"
+
+# The base image's entrypoint is the vllm CLI; start a shell instead so `docker run verl:xpu <cmd>` runs <cmd>.
+ENTRYPOINT []
+CMD ["/bin/bash"]

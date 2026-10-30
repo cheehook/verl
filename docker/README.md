@@ -197,6 +197,17 @@ launch flow, the baked-cache mechanics, and re-locking — see
 **"Install with uv"** in
 [`docs/start/install.rst`](../docs/start/install.rst).
 
+## Intel GPU image (`Dockerfile.xpu`)
+
+`docker/Dockerfile.xpu` builds verl for Intel GPUs (XPU) on top of `vllm/vllm-openai-xpu:v0.29.0` (torch 2.13 xpu, vLLM 0.29), with transformers 5.17, kernels 0.16.2 (hub `flash_attention_2` on XPU), peft 0.21.2 and `verl-hardware-plugin`, which registers the `intel` platform. It pins verl's dependencies to the base image's torch / vLLM / Ray so pip cannot pull a CUDA or CPU build, and patches peft so LoRA adapters can be collected under verl's nested FSDP1 wrapping.
+
+```sh
+docker build -f docker/Dockerfile.xpu -t verl:xpu .
+docker run --rm -it --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host verl:xpu
+# then, inside the container (the example detects the Intel GPUs and applies its XPU settings):
+NGPUS_PER_NODE=4 bash examples/tuning/lora/run_qwen3_8b_fsdp.sh
+```
+
 ## Installation from Docker
 
 After pulling the desired Docker image and installing desired inference and training frameworks, you can run it with the following steps:
