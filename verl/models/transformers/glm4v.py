@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import itertools
 import logging
 import os
@@ -27,9 +26,8 @@ from transformers.models.glm4v.modeling_glm4v import (
     Glm4vForConditionalGeneration,
     Glm4vTextAttention,
 )
-from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10, is_torch_xpu_available
 
-from verl.utils.device import is_npu_available
+from verl.utils.attention_utils import get_flash_attn_functions
 from verl.utils.transformers_compat import unpack_visual_output
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
@@ -41,43 +39,6 @@ from verl.utils.ulysses import (
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-
-if is_flash_attn_2_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-
-    _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
-    _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
-    _flash_use_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
-
-if is_npu_available:
-    from transformers.integrations.npu_flash_attention import npu_flash_attn_func as flash_attn_func
-    from transformers.integrations.npu_flash_attention import npu_flash_attn_varlen_func as flash_attn_varlen_func
-    from transformers.modeling_flash_attention_utils import flash_attn_supports_top_left_mask
-
-    _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
-    _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
-    _flash_use_top_left_mask = flash_attn_supports_top_left_mask()
-
-# Intel GPU has no flash_attn package; transformers loads FlashAttention-2 from its hub kernel instead.
-# The kernel is fetched on the first attention call, so importing this module stays offline.
-_needs_hub_flash_attn = is_torch_xpu_available() and not is_flash_attn_2_available()
-
-if _needs_hub_flash_attn:
-    from transformers.modeling_flash_attention_utils import flash_attn_supports_top_left_mask
-
-    _flash_use_top_left_mask = flash_attn_supports_top_left_mask()
-
-
-def _load_hub_flash_attn():
-    global flash_attn_func, flash_attn_varlen_func, _flash_supports_window_size, _flash_supports_deterministic
-    global _needs_hub_flash_attn
-    from transformers.modeling_flash_attention_utils import lazy_import_flash_attention
-
-    (flash_attn_func, flash_attn_varlen_func, *_), _ = lazy_import_flash_attention("flash_attention_2")
-    _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
-    _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
-    _needs_hub_flash_attn = False
 
 
 _flash_deterministic_enabled = os.getenv("FLASH_ATTENTION_DETERMINISTIC", "0") == "1"
@@ -236,13 +197,12 @@ def _custom_flash_attention_forward(
     """
     Patches flash attention forward to handle 3D position ids in mrope. (3, batch_size, seq_length)
     """
-    if _needs_hub_flash_attn:
-        _load_hub_flash_attn()
+    flash_attn = get_flash_attn_functions()
 
     # Assuming 4D tensors, key_states.shape[1] is the key/value sequence length (source length).
     flash_kwargs = {}
 
-    if _flash_supports_deterministic:
+    if flash_attn.supports_deterministic:
         flash_kwargs["deterministic"] = deterministic if deterministic is not None else _flash_deterministic_enabled
 
     if kwargs.get("softcap") is not None:
@@ -271,7 +231,7 @@ def _custom_flash_attention_forward(
         q, k, v, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k) = prepare_fa2_from_position_ids(
             query_states, key_states, value_states, position_ids
         )
-        attn_output = flash_attn_varlen_func(
+        attn_output = flash_attn.varlen_func(
             q=q,
             k=k,
             v=v,
@@ -349,7 +309,7 @@ def glm4v_attn_forward(
         query_length=q_len,
         is_causal=getattr(self, "is_causal", True),
         dropout=dropout_rate,
-        use_top_left_mask=_flash_use_top_left_mask,
+        use_top_left_mask=get_flash_attn_functions().use_top_left_mask,
         position_ids=position_ids,  # important: pass position ids
     )  # (batch_size, seq_length / sp_size, num_head, head_size)
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()

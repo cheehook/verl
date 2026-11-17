@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Callable
+import inspect
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 _index_first_axis, _pad_input, _rearrange, _unpad_input = None, None, None, None
 
@@ -99,4 +101,75 @@ def unpad_input(*args, **kwargs):
     return func(*args, **kwargs)
 
 
-__all__ = ["index_first_axis", "pad_input", "rearrange", "unpad_input"]
+@dataclass(frozen=True)
+class FlashAttnFunctions:
+    """FlashAttention-2 varlen kernel for the current device, with the flags its callers need."""
+
+    varlen_func: Callable
+    supports_window_size: bool
+    supports_deterministic: bool
+    use_top_left_mask: bool
+
+
+_flash_attn_functions: Optional[FlashAttnFunctions] = None
+
+
+def get_flash_attn_functions() -> FlashAttnFunctions:
+    """Return FlashAttention-2 for the current device, resolved on first call.
+
+    - NPU: the transformers NPU flash-attention integration.
+    - With flash-attn installed: the `flash_attn` package.
+    - Intel GPU without flash-attn: the hub kernel loaded by transformers
+      (`kernels-community/flash-attn2`), fetched on this first call.
+
+    Raises:
+        RuntimeError: If no FlashAttention-2 implementation exists for the device.
+    """
+    global _flash_attn_functions
+    if _flash_attn_functions is not None:
+        return _flash_attn_functions
+
+    from transformers.modeling_flash_attention_utils import flash_attn_supports_top_left_mask
+    from transformers.utils import (
+        is_flash_attn_2_available,
+        is_flash_attn_greater_or_equal_2_10,
+        is_torch_xpu_available,
+    )
+
+    from verl.utils.device import is_npu_available
+
+    if is_npu_available:
+        from transformers.integrations.npu_flash_attention import npu_flash_attn_func as flash_attn_func
+        from transformers.integrations.npu_flash_attention import npu_flash_attn_varlen_func as flash_attn_varlen_func
+
+        use_top_left_mask = flash_attn_supports_top_left_mask()
+    elif is_flash_attn_2_available():
+        from flash_attn import flash_attn_func, flash_attn_varlen_func
+
+        use_top_left_mask = not is_flash_attn_greater_or_equal_2_10()
+    elif is_torch_xpu_available():
+        from transformers.modeling_flash_attention_utils import lazy_import_flash_attention
+
+        (flash_attn_func, flash_attn_varlen_func, *_), _ = lazy_import_flash_attention("flash_attention_2")
+        use_top_left_mask = flash_attn_supports_top_left_mask()
+    else:
+        raise RuntimeError("FlashAttention-2 is required here: install flash-attn, or run on NPU or Intel GPU.")
+
+    params = inspect.signature(flash_attn_func).parameters
+    _flash_attn_functions = FlashAttnFunctions(
+        varlen_func=flash_attn_varlen_func,
+        supports_window_size="window_size" in params,
+        supports_deterministic="deterministic" in params,
+        use_top_left_mask=use_top_left_mask,
+    )
+    return _flash_attn_functions
+
+
+__all__ = [
+    "FlashAttnFunctions",
+    "get_flash_attn_functions",
+    "index_first_axis",
+    "pad_input",
+    "rearrange",
+    "unpad_input",
+]
