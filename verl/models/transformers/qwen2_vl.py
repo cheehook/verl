@@ -26,7 +26,7 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VLCausalLMOutputWithPast,
     Qwen2VLForConditionalGeneration,
 )
-from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10
+from transformers.utils import is_flash_attn_2_available, is_flash_attn_greater_or_equal_2_10, is_torch_xpu_available
 
 from verl.utils.device import is_npu_available
 from verl.utils.transformers_compat import is_transformers_version_in_range, unpack_visual_output
@@ -57,6 +57,27 @@ if is_npu_available:
     _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
     _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
     _flash_use_top_left_mask = flash_attn_supports_top_left_mask()
+
+# Intel GPU has no flash_attn package; transformers loads FlashAttention-2 from its hub kernel instead.
+# The kernel is fetched on the first attention call, so importing this module stays offline.
+_needs_hub_flash_attn = is_torch_xpu_available() and not is_flash_attn_2_available()
+
+if _needs_hub_flash_attn:
+    from transformers.modeling_flash_attention_utils import flash_attn_supports_top_left_mask
+
+    _flash_use_top_left_mask = flash_attn_supports_top_left_mask()
+
+
+def _load_hub_flash_attn():
+    global flash_attn_func, flash_attn_varlen_func, _flash_supports_window_size, _flash_supports_deterministic
+    global _needs_hub_flash_attn
+    from transformers.modeling_flash_attention_utils import lazy_import_flash_attention
+
+    (flash_attn_func, flash_attn_varlen_func, *_), _ = lazy_import_flash_attention("flash_attention_2")
+    _flash_supports_window_size = "window_size" in inspect.signature(flash_attn_func).parameters
+    _flash_supports_deterministic = "deterministic" in inspect.signature(flash_attn_func).parameters
+    _needs_hub_flash_attn = False
+
 
 _flash_deterministic_enabled = os.getenv("FLASH_ATTENTION_DETERMINISTIC", "0") == "1"
 
@@ -195,6 +216,9 @@ def _custom_flash_attention_forward(
     """
     Patches flash attention forward to handle 3D position ids in mrope. (3, batch_size, seq_length)
     """
+    if _needs_hub_flash_attn:
+        _load_hub_flash_attn()
+
     # Assuming 4D tensors, key_states.shape[1] is the key/value sequence length (source length).
     use_sliding_windows = (
         _flash_supports_window_size and sliding_window is not None and key_states.shape[1] > sliding_window
