@@ -46,12 +46,6 @@ set_basic_config(level=logging.WARNING)
 __all__ = ["DataProto", "__version__"]
 
 
-modules = os.getenv("VERL_USE_EXTERNAL_MODULES", "")
-if modules:
-    modules = modules.split(",")
-    import_external_libs(modules)
-
-
 # Auto-discover plugins via setuptools entry_points.
 # Controlled by VERL_USE_EXTERNAL_PLUGINS:
 #   "auto"  — load all entry_points in the "verl.plugins" group (default)
@@ -74,6 +68,15 @@ if _plugins_policy != "none":
             _ep.load()
         except Exception as _e:
             logging.getLogger(__name__).debug("Failed to load plugin '%s': %s", _ep.name, _e)
+
+
+# Import external modules after the plugins: an external module may import code
+# that detects the platform at import time, and an out-of-tree platform is only
+# registered once its plugin has loaded.
+modules = os.getenv("VERL_USE_EXTERNAL_MODULES", "")
+if modules:
+    modules = modules.split(",")
+    import_external_libs(modules)
 
 
 if os.getenv("VERL_USE_MODELSCOPE", "False").lower() == "true":
