@@ -45,8 +45,6 @@ from verl.models.mcore.util import (
 from verl.utils.device import get_device_name
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
 
-device_name = get_device_name()
-
 
 def _context_parallel_layout(tf_config) -> str:
     if getattr(tf_config, "experimental_attention_variant", None) == "dsv4_hybrid":
@@ -327,7 +325,7 @@ def merge_router_topk_indices(
             layers_topk_idx.append(router.recorded_topk_idx.to(torch.int16))  # dynamic_bs, topk
 
         # layer_num, dynamic_bs, topk  -> dynamic_bs, layer_num, topk
-        layers_topk_idx = torch.stack(layers_topk_idx).permute(1, 0, 2).to(device_name)
+        layers_topk_idx = torch.stack(layers_topk_idx).permute(1, 0, 2).to(get_device_name())
         layers_topk_idx = layers_topk_idx.contiguous().view(torch.uint8)
         # dynamic_bs, layer_num, topk -> 1, dynamic_bs_all, layer_num, topk
         layers_topk_idx = (
@@ -515,12 +513,12 @@ def set_router_replay_data(
 
         # 1, dynamic_bs_split, layer_num, topk
         layers_topk_idx_rmpad_split = scatter_to_sequence_parallel_region(
-            layers_topk_idx_rmpad.to(device_name).squeeze(dim=0)
+            layers_topk_idx_rmpad.to(get_device_name()).squeeze(dim=0)
         ).unsqueeze(dim=0)
         replay_mask_rmpad_split = None
         if replay_mask_rmpad is not None:
             replay_mask_rmpad_split = scatter_to_sequence_parallel_region(
-                replay_mask_rmpad.to(device_name).squeeze(dim=0)
+                replay_mask_rmpad.to(get_device_name()).squeeze(dim=0)
             )
 
         # dynamic_bs_split, layer_num, topk -> layer_num, dynamic_bs_split, topk
@@ -728,7 +726,7 @@ def pp_gather(local_layers_router_map, tf_config):
         # PP stages may own different numbers of MoE layers, including zero. Exchange
         # layer counts, pad only that dimension for NCCL, then remove the padding.
         # NCCL has no int16 datatype, so payloads travel as bit-identical uint8 views.
-        payload = local_layers_router_map.to(device_name).contiguous().view(torch.uint8)
+        payload = local_layers_router_map.to(get_device_name()).contiguous().view(torch.uint8)
         local_layer_count = torch.tensor([local_layers_router_map.shape[2]], dtype=torch.int64, device=payload.device)
         gathered_layer_counts = [torch.empty_like(local_layer_count) for _ in range(world_size)]
         torch.distributed.all_gather(

@@ -99,8 +99,6 @@ def _hf_entry_row_slots(name, spec, place, lidx, lval):
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-device_name = get_device_name()
-
 
 class TorchTitanEngine(BaseEngine):
     """
