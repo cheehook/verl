@@ -88,8 +88,6 @@ from .utils import create_device_mesh, get_sharding_strategy, unfuse_moe_params
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-device_name = get_device_name()
-
 
 def _is_scalar_unit_temperature(temperature) -> bool:
     """Return whether a host scalar temperature makes scaling a no-op."""
@@ -259,7 +257,9 @@ class FSDPEngine(BaseEngine):
         dp_size = self.get_data_parallel_size()
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(
-                device_name, mesh_shape=(dp_size, self.ulysses_sequence_parallel_size), mesh_dim_names=["dp", "sp"]
+                get_device_name(),
+                mesh_shape=(dp_size, self.ulysses_sequence_parallel_size),
+                mesh_dim_names=["dp", "sp"],
             )
             self.ulysses_parallel_group = self.ulysses_device_mesh["sp"].get_group()
 

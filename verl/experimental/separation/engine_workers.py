@@ -20,15 +20,10 @@ from typing import Callable, Optional
 from omegaconf import DictConfig
 
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.utils.device import (
-    get_device_name,
-)
 from verl.workers.engine_workers import ActorRolloutRefWorker, DistillationConfig
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-device_name = get_device_name()
 
 __all__ = ["DetachActorWorker"]
 
